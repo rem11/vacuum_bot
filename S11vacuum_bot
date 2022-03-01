@@ -1,0 +1,28 @@
+#!/bin/sh
+
+load() {
+    echo "starting vacuum_bot"
+    start-stop-daemon -S -b -q -m -p /var/run/vacuum_bot.pid -x /usr/local/bin/vacuum_bot
+}
+
+unload() {
+    echo "stopping vacuum_bot"
+    start-stop-daemon -K -q -p /var/run/vacuum_bot.pid
+}
+
+case "$1" in
+    start)
+        load
+        ;;
+    stop)
+        unload
+        ;;
+    restart)
+        unload
+        load
+        ;;
+    *)
+        echo "$0 <start/stop/restart>"
+        ;;
+esac
+
