@@ -2,23 +2,34 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"io/ioutil"
 	"log"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const BotToken = "..."
-const AuthorizedUser = "..."
-const ApiEndpoint = ""
 const ConnectionAttempts = 5
 const RetryTime = 5 * time.Second
 
-func initApi() (*tgbotapi.BotAPI, error) {
+var configFile = flag.String("config", "/etc/vacuum_bot.json", "Config file path")
+
+type Config struct {
+	ApiUrl          string   `json:"apiUrl"`
+	BotToken        string   `json:"botToken"`
+	AuthorizedUsers []string `json:"authorizedUsers"`
+}
+
+func initApi(config *Config) (*tgbotapi.BotAPI, error) {
 	i := ConnectionAttempts
 	for {
-		bot, err := tgbotapi.NewBotAPI(BotToken)
+		bot, err := tgbotapi.NewBotAPI(config.BotToken)
 		i--
 		if err == nil {
 			return bot, nil
@@ -35,26 +46,101 @@ func initApi() (*tgbotapi.BotAPI, error) {
 	}
 }
 
-func main() {
-	bot, err := initApi()
-	if err != nil {
-		log.Panic(err)
+func validateConfig(config Config) error {
+	if config.ApiUrl == "" {
+		err := errors.New("apiUrl is missing in config")
+		log.Print(err.Error())
+		return err
 	}
-	log.Printf("Authorized on account %s", bot.Self.UserName)
+	if config.BotToken == "" {
+		err := errors.New("botToken is missing in config")
+		log.Print(err.Error())
+		return err
+	}
+	if config.AuthorizedUsers == nil {
+		err := errors.New("authorizedUsers are missing in config")
+		log.Print(err.Error())
+		return err
+	}
+	return nil
+}
+
+func readConfig() (*Config, error) {
+	flag.Parse()
+	file, err := os.Open(*configFile)
+	defer file.Close()
+	if err != nil {
+		log.Print(err.Error())
+		return nil, err
+	}
+	bytes, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Print(err.Error())
+		return nil, err
+	}
+	var config Config
+	err = json.Unmarshal(bytes, &config)
+	if err != nil {
+		log.Print(err.Error())
+		return nil, err
+	}
+	err = validateConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+func setCommands(bot *tgbotapi.BotAPI) error {
+	_, err := bot.Request(tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{
+			Command:     "zones",
+			Description: "List zones for cleanup",
+		},
+		tgbotapi.BotCommand{
+			Command:     "pause",
+			Description: "Pause",
+		},
+		tgbotapi.BotCommand{
+			Command:     "home",
+			Description: "Go back to the dock",
+		},
+		tgbotapi.BotCommand{
+			Command:     "status",
+			Description: "Display status",
+		},
+	))
+	if err != nil {
+		log.Print(err.Error())
+		return err
+	}
+	return nil
+}
+
+func isAuthorizedUser(userName string, config *Config) bool {
+	for _, authorizedUser := range config.AuthorizedUsers {
+		if userName == authorizedUser {
+			return true
+		}
+	}
+	return false
+}
+
+func processUpdates(bot *tgbotapi.BotAPI, config *Config) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
-	updates, err := bot.GetUpdatesChan(u)
-	client := NewClient()
+	updates := bot.GetUpdatesChan(u)
+	client := NewClient(config.ApiUrl)
 	ctx := context.Background()
 	for update := range updates {
 		if update.Message != nil {
-			if update.Message.From.UserName != AuthorizedUser {
+			if !isAuthorizedUser(update.Message.From.UserName, config) {
 				continue
 			}
 			if update.Message.IsCommand() {
 				switch update.Message.Command() {
-				case "clean":
-					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Please select zone to clean")
+				case "zones":
+					msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Available zones:")
 					zones, err := client.GetZoneCleaningCapabilityPresets(ctx)
 					if err != nil {
 						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, err.Error()))
@@ -67,7 +153,7 @@ func main() {
 					}
 					i := 1
 					for _, value := range *zones {
-						callbackData := value.ID
+						callbackData := value.ID + "|" + value.Name
 						buttons[i] = tgbotapi.InlineKeyboardButton{
 							Text:         value.Name,
 							CallbackData: &callbackData,
@@ -84,11 +170,15 @@ func main() {
 					err := client.PutBasicControlCapability(ctx, "pause")
 					if err != nil {
 						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, err.Error()))
+					} else {
+						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Pausing"))
 					}
 				case "home":
 					err := client.PutBasicControlCapability(ctx, "home")
 					if err != nil {
 						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, err.Error()))
+					} else {
+						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Going back to the dock"))
 					}
 				case "start":
 					// Do nothing
@@ -96,41 +186,61 @@ func main() {
 					attrs, err := client.GetStateAttributes(ctx)
 					if err != nil {
 						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, err.Error()))
-					}
-					var status string
-					var batteryLevel int
-					for _, attr := range *attrs {
-						switch attr.Class {
-						case "StatusStateAttribute":
-							status = attr.Value.(string)
-						case "BatteryStateAttribute":
-							batteryLevel = attr.Level
+					} else {
+						var status string
+						var batteryLevel int
+						for _, attr := range *attrs {
+							switch attr.Class {
+							case "StatusStateAttribute":
+								status = attr.Value.(string)
+							case "BatteryStateAttribute":
+								batteryLevel = attr.Level
+							}
 						}
+						bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Status: "+status+"\nBattery: "+strconv.Itoa(batteryLevel)+"%"))
 					}
-					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Status: "+status+"\nBattery: "+strconv.Itoa(batteryLevel)+"%"))
 				default:
 					bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Unknown command"))
 				}
 			}
 		}
 		if update.CallbackQuery != nil {
-			if update.CallbackQuery.From.UserName != AuthorizedUser {
+			if !isAuthorizedUser(update.CallbackQuery.From.UserName, config) {
 				continue
 			}
-			switch update.CallbackQuery.Data {
+			callbackData := strings.Split(update.CallbackQuery.Data, "|")
+			switch callbackData[0] {
 			case "all":
 				err := client.PutBasicControlCapability(ctx, "start")
 				if err != nil {
 					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, err.Error()))
+				} else {
+					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Starting cleanup"))
 				}
 			default:
 				// TODO: input validation for UUID
-				err := client.PutZoneCleaningCapabilityPresets(ctx, update.CallbackQuery.Data)
+				err := client.PutZoneCleaningCapabilityPresets(ctx, callbackData[0])
 				if err != nil {
 					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, err.Error()))
+				} else {
+					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Starting cleanup for zone: "+callbackData[1]))
 				}
 			}
 		}
 
 	}
+}
+
+func main() {
+	config, err := readConfig()
+	if err != nil {
+		log.Panic(err)
+	}
+	bot, err := initApi(config)
+	if err != nil {
+		log.Panic(err)
+	}
+	log.Printf("Authorized on account %s", bot.Self.UserName)
+	setCommands(bot)
+	processUpdates(bot, config)
 }

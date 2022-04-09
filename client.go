@@ -9,10 +9,6 @@ import (
 	"time"
 )
 
-const (
-	BaseURLV2 = "http://127.0.0.1/api/v2"
-)
-
 type Client struct {
 	BaseURL    string
 	apiKey     string
@@ -42,9 +38,9 @@ type StateAttribute struct {
 
 type GetStateAttributesResponse []StateAttribute
 
-func NewClient() *Client {
+func NewClient(URL string) *Client {
 	return &Client{
-		BaseURL: BaseURLV2,
+		BaseURL: URL + "/api/v2",
 		HTTPClient: &http.Client{
 			Timeout: time.Minute,
 		},
