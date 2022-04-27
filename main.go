@@ -209,20 +209,23 @@ func processUpdates(bot *tgbotapi.BotAPI, config *Config) {
 				continue
 			}
 			callbackData := strings.Split(update.CallbackQuery.Data, "|")
-			switch callbackData[0] {
-			case "all":
+			if callbackData[0] == "all" {
 				err := client.PutBasicControlCapability(ctx, "start")
 				if err != nil {
+					bot.Send(tgbotapi.NewCallback(update.CallbackQuery.ID, err.Error()))
 					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, err.Error()))
 				} else {
+					bot.Send(tgbotapi.NewCallback(update.CallbackQuery.ID, "Starting cleanup"))
 					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Starting cleanup"))
 				}
-			default:
+			} else {
 				// TODO: input validation for UUID
 				err := client.PutZoneCleaningCapabilityPresets(ctx, callbackData[0])
 				if err != nil {
+					bot.Send(tgbotapi.NewCallback(update.CallbackQuery.ID, err.Error()))
 					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, err.Error()))
 				} else {
+					bot.Send(tgbotapi.NewCallback(update.CallbackQuery.ID, "Starting cleanup for zone: "+callbackData[1]))
 					bot.Send(tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Starting cleanup for zone: "+callbackData[1]))
 				}
 			}
